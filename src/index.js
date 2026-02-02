@@ -15,7 +15,16 @@ class MCPManager {
   async connectServer(name, config) {
     try {
       const url = config.url;
-      this.logger.info(`[MCP] Connecting to ${name} at ${url}`);
+      let safeUrl = url;
+      try {
+        const u = new URL(url);
+        u.password = '';
+        u.username = '';
+        safeUrl = u.toString();
+      } catch (e) {
+        // invalid url, just keep it as is or mask it
+      }
+      this.logger.info(`[MCP] Connecting to ${name} at ${safeUrl}`);
 
       const transport = new StreamableHTTPClientTransport(url);
 
