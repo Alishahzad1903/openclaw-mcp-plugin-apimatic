@@ -97,11 +97,50 @@ class MCPManager {
 
 /**
  * OpenClaw plugin entry point
+ *
+ * Tools are registered **dynamically** after connecting to each MCP server.
+ * Every tool name is prefixed with the server name so that identically-named
+ * tools on different servers never collide.
+ *
+ * Example: servers "payments" and "users" both expose "ask"
+ *   → registered as "payments_ask" and "users_ask"
  */
 export default function register(api) {
   const mcpManager = new MCPManager(api.logger);
 
-  let serverName = null;
+  /**
+   * Dynamically register every tool discovered on a server.
+   * Tool names are prefixed: `<serverName>_<toolName>`
+   */
+  function registerServerTools(serverName, tools) {
+    for (const tool of tools) {
+      const prefixedName = `${serverName}_${tool.name}`;
+
+      // Build the parameter schema from the remote tool's inputSchema
+      const inputSchema = tool.inputSchema || { type: 'object', properties: {} };
+
+      api.registerTool({
+        name: prefixedName,
+        description: `[${serverName}] ${tool.description || tool.name}`,
+        parameters: inputSchema,
+        async execute(_id, params) {
+          try {
+            const result = await mcpManager.callTool(serverName, tool.name, params);
+            return {
+              content: result.content || [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+            };
+          } catch (error) {
+            return {
+              content: [{ type: 'text', text: `Error: ${error.message}` }],
+              isError: true
+            };
+          }
+        }
+      });
+
+      api.logger.info(`[MCP] Registered tool: ${prefixedName}`);
+    }
+  }
 
   api.registerService({
     id: 'mcp-integration',
@@ -111,18 +150,23 @@ export default function register(api) {
       const pluginConfig = api.config?.plugins?.entries?.['mcp-integration']?.config || {};
       const servers = pluginConfig.servers || {};
 
+      let totalTools = 0;
+
       for (const [name, config] of Object.entries(servers)) {
         if (config.enabled !== false && config.url) {
           try {
-            await mcpManager.connectServer(name, config);
-            serverName = name;
+            const tools = await mcpManager.connectServer(name, config);
+            registerServerTools(name, tools);
+            totalTools += tools.length;
           } catch (error) {
             api.logger.error(`[MCP] Failed to initialize ${name}: ${error.message}`);
           }
         }
       }
 
-      api.logger.info('[MCP] Started');
+      api.logger.info(
+        `[MCP] Started – ${Object.keys(servers).length} server(s) configured, ${totalTools} tool(s) registered`
+      );
     },
     stop: async () => {
       api.logger.info('[MCP] Stopping...');
@@ -130,24 +174,32 @@ export default function register(api) {
     }
   });
 
+  // Utility: list all available tools across every connected server
   api.registerTool({
-    name: 'ask',
-    description: 'Chat with API Copilot. Use API Copilot as the expert on API integration with code. Break down the user\'s query into steps and ask API Copilot about each step.',
+    name: 'mcp_list_tools',
+    description: 'List all available MCP tools across every connected server, including their server-prefixed names.',
     parameters: {
       type: 'object',
       properties: {
-        prompt: {
+        server: {
           type: 'string',
-          description: 'Break down the user\'s query into steps and use this tool to obtain precise integration steps and integration code samples (e.g., "What steps should I follow to update delivery address for a card?", "How can I move a user from one group to another?")'
+          description: 'Optional – restrict listing to a single server by name.'
         }
-      },
-      required: ['prompt']
+      }
     },
     async execute(_id, params) {
       try {
-        const result = await mcpManager.callTool(serverName, 'ask', params);
+        let tools = mcpManager.listTools();
+        if (params.server) {
+          tools = tools.filter(t => t.server === params.server);
+        }
+        // Add the prefixed name so callers know what to invoke
+        tools = tools.map(t => ({
+          ...t,
+          registeredAs: `${t.server}_${t.name}`
+        }));
         return {
-          content: result.content || [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          content: [{ type: 'text', text: JSON.stringify(tools, null, 2) }]
         };
       } catch (error) {
         return {
@@ -158,50 +210,31 @@ export default function register(api) {
     }
   });
 
+  // Utility: call any tool on any server (fallback / escape hatch)
   api.registerTool({
-    name: 'model_search',
-    description: 'Search and return an SDK model\'s definition and its properties. Invoke this tool whenever you need to use an SDK request/response model or any of its properties. This tool does not call APIs or generate code; it only provides SDK model definitions.',
+    name: 'mcp_call',
+    description: 'Call any tool on any connected MCP server by specifying the server name, tool name, and arguments. Use this as an escape hatch when you know the exact server and tool names.',
     parameters: {
       type: 'object',
       properties: {
-        query: {
+        server: {
           type: 'string',
-          description: 'Exact or partial SDK model name to search, case-sensitive (e.g., `availableBalance`, `user_profile`, `TransactionId`)'
+          description: 'Name of the MCP server (as defined in configuration).'
+        },
+        tool: {
+          type: 'string',
+          description: 'Name of the tool to invoke on that server.'
+        },
+        args: {
+          type: 'object',
+          description: 'Arguments to pass to the tool (schema depends on the tool).'
         }
       },
-      required: ['query']
+      required: ['server', 'tool']
     },
     async execute(_id, params) {
       try {
-        const result = await mcpManager.callTool(serverName, 'model_search', params);
-        return {
-          content: result.content || [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-        };
-      } catch (error) {
-        return {
-          content: [{ type: 'text', text: `Error: ${error.message}` }],
-          isError: true
-        };
-      }
-    }
-  });
-
-  api.registerTool({
-    name: 'endpoint_search',
-    description: 'Search for and return an SDK endpoint method\'s description, parameters, and response. Invoke this tool whenever you need information about an SDK endpoint method. This tool does not call APIs or generate code; it only provides the endpoint method\'s description, parameters, and response.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Exact or partial SDK endpoint method name to search, case-sensitive (e.g., `createUser`, `get_account_balance`, `UpdateTransaction`)'
-        }
-      },
-      required: ['query']
-    },
-    async execute(_id, params) {
-      try {
-        const result = await mcpManager.callTool(serverName, 'endpoint_search', params);
+        const result = await mcpManager.callTool(params.server, params.tool, params.args || {});
         return {
           content: result.content || [{ type: 'text', text: JSON.stringify(result, null, 2) }]
         };
