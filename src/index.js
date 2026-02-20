@@ -101,6 +101,8 @@ class MCPManager {
 export default function register(api) {
   const mcpManager = new MCPManager(api.logger);
 
+  let serverName = null;
+
   api.registerService({
     id: 'mcp-integration',
     start: async () => {
@@ -113,6 +115,7 @@ export default function register(api) {
         if (config.enabled !== false && config.url) {
           try {
             await mcpManager.connectServer(name, config);
+            serverName = name;
           } catch (error) {
             api.logger.error(`[MCP] Failed to initialize ${name}: ${error.message}`);
           }
@@ -128,62 +131,80 @@ export default function register(api) {
   });
 
   api.registerTool({
-    name: 'mcp',
-    description: 'Call MCP (Model Context Protocol) server tools. Use action=list to see available tools, then action=call to invoke them.',
+    name: 'ask',
+    description: 'Chat with API Copilot. Use API Copilot as the expert on API integration with code. Break down the user\'s query into steps and ask API Copilot about each step.',
     parameters: {
       type: 'object',
       properties: {
-        action: {
+        prompt: {
           type: 'string',
-          enum: ['list', 'call'],
-          description: 'Action: list or call'
-        },
-        server: {
-          type: 'string',
-          description: 'MCP server name (for call)'
-        },
-        tool: {
-          type: 'string',
-          description: 'Tool name (for call)'
-        },
-        args: {
-          type: 'object',
-          description: 'Tool arguments (for call)'
+          description: 'Break down the user\'s query into steps and use this tool to obtain precise integration steps and integration code samples (e.g., "What steps should I follow to update delivery address for a card?", "How can I move a user from one group to another?")'
         }
       },
-      required: ['action']
+      required: ['prompt']
     },
     async execute(_id, params) {
       try {
-        switch (params.action) {
-          case 'list': {
-            const tools = mcpManager.listTools();
-            return {
-              content: [{
-                type: 'text',
-                text: tools.length > 0
-                  ? JSON.stringify(tools, null, 2)
-                  : 'No MCP tools available. Check server connection.'
-              }]
-            };
-          }
+        const result = await mcpManager.callTool(serverName, 'ask', params);
+        return {
+          content: result.content || [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          isError: true
+        };
+      }
+    }
+  });
 
-          case 'call': {
-            if (!params.server || !params.tool) {
-              throw new Error('server and tool are required for call action');
-            }
-            const result = await mcpManager.callTool(params.server, params.tool, params.args || {});
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify(result, null, 2)
-              }]
-            };
-          }
-
-          default:
-            throw new Error(`Unknown action: ${params.action}`);
+  api.registerTool({
+    name: 'model_search',
+    description: 'Search and return an SDK model\'s definition and its properties. Invoke this tool whenever you need to use an SDK request/response model or any of its properties. This tool does not call APIs or generate code; it only provides SDK model definitions.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Exact or partial SDK model name to search, case-sensitive (e.g., `availableBalance`, `user_profile`, `TransactionId`)'
         }
+      },
+      required: ['query']
+    },
+    async execute(_id, params) {
+      try {
+        const result = await mcpManager.callTool(serverName, 'model_search', params);
+        return {
+          content: result.content || [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          isError: true
+        };
+      }
+    }
+  });
+
+  api.registerTool({
+    name: 'endpoint_search',
+    description: 'Search for and return an SDK endpoint method\'s description, parameters, and response. Invoke this tool whenever you need information about an SDK endpoint method. This tool does not call APIs or generate code; it only provides the endpoint method\'s description, parameters, and response.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Exact or partial SDK endpoint method name to search, case-sensitive (e.g., `createUser`, `get_account_balance`, `UpdateTransaction`)'
+        }
+      },
+      required: ['query']
+    },
+    async execute(_id, params) {
+      try {
+        const result = await mcpManager.callTool(serverName, 'endpoint_search', params);
+        return {
+          content: result.content || [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
       } catch (error) {
         return {
           content: [{ type: 'text', text: `Error: ${error.message}` }],
