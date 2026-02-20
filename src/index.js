@@ -101,6 +101,34 @@ class MCPManager {
 export default function register(api) {
   const mcpManager = new MCPManager(api.logger);
 
+  function registerMcpTools(serverName, tools) {
+    for (const tool of tools) {
+      api.registerTool({
+        name: tool.name,
+        description: tool.description || `MCP tool "${tool.name}" from server "${serverName}"`,
+        parameters: tool.inputSchema || { type: 'object', properties: {} },
+        async execute(_id, params) {
+          try {
+            const result = await mcpManager.callTool(serverName, tool.name, params || {});
+            return {
+              content: result.content || [{
+                type: 'text',
+                text: JSON.stringify(result, null, 2)
+              }]
+            };
+          } catch (error) {
+            return {
+              content: [{ type: 'text', text: `Error: ${error.message}` }],
+              isError: true
+            };
+          }
+        }
+      });
+
+      api.logger.info(`[MCP] Registered tool: ${tool.name} (from ${serverName})`);
+    }
+  }
+
   api.registerService({
     id: 'mcp-integration',
     start: async () => {
@@ -112,7 +140,8 @@ export default function register(api) {
       for (const [name, config] of Object.entries(servers)) {
         if (config.enabled !== false && config.url) {
           try {
-            await mcpManager.connectServer(name, config);
+            const tools = await mcpManager.connectServer(name, config);
+            registerMcpTools(name, tools);
           } catch (error) {
             api.logger.error(`[MCP] Failed to initialize ${name}: ${error.message}`);
           }
@@ -124,72 +153,6 @@ export default function register(api) {
     stop: async () => {
       api.logger.info('[MCP] Stopping...');
       await mcpManager.disconnect();
-    }
-  });
-
-  api.registerTool({
-    name: 'mcp',
-    description: 'Call MCP (Model Context Protocol) server tools. Use action=list to see available tools, then action=call to invoke them.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['list', 'call'],
-          description: 'Action: list or call'
-        },
-        server: {
-          type: 'string',
-          description: 'MCP server name (for call)'
-        },
-        tool: {
-          type: 'string',
-          description: 'Tool name (for call)'
-        },
-        args: {
-          type: 'object',
-          description: 'Tool arguments (for call)'
-        }
-      },
-      required: ['action']
-    },
-    async execute(_id, params) {
-      try {
-        switch (params.action) {
-          case 'list': {
-            const tools = mcpManager.listTools();
-            return {
-              content: [{
-                type: 'text',
-                text: tools.length > 0
-                  ? JSON.stringify(tools, null, 2)
-                  : 'No MCP tools available. Check server connection.'
-              }]
-            };
-          }
-
-          case 'call': {
-            if (!params.server || !params.tool) {
-              throw new Error('server and tool are required for call action');
-            }
-            const result = await mcpManager.callTool(params.server, params.tool, params.args || {});
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify(result, null, 2)
-              }]
-            };
-          }
-
-          default:
-            throw new Error(`Unknown action: ${params.action}`);
-        }
-      } catch (error) {
-        return {
-          content: [{ type: 'text', text: `Error: ${error.message}` }],
-          isError: true
-        };
-      }
     }
   });
 
